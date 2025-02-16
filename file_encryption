@@ -1,0 +1,149 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <openssl/aes.h>
+#include <openssl/rsa.h>
+#include <openssl/pem.h>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+
+#define XOR_KEY 0xAB
+#define CAESAR_SHIFT 3
+#define AES_BLOCK_SIZE 16
+#define RSA_KEY_SIZE 2048
+#define PBKDF2_ITERATIONS 10000
+#define SALT_SIZE 16
+
+void xorEncryptDecrypt(const char *inputFile, const char *outputFile) {
+    FILE *inFile = fopen(inputFile, "rb");
+    FILE *outFile = fopen(outputFile, "wb");
+    if (!inFile || !outFile) { printf("Error opening files!\n"); exit(1); }
+
+    unsigned char buffer;
+    while (fread(&buffer, sizeof(buffer), 1, inFile)) {
+        buffer ^= XOR_KEY;
+        fwrite(&buffer, sizeof(buffer), 1, outFile);
+    }
+    fclose(inFile);
+    fclose(outFile);
+}
+
+void caesarEncryptDecrypt(const char *inputFile, const char *outputFile, int shift) {
+    FILE *inFile = fopen(inputFile, "rb");
+    FILE *outFile = fopen(outputFile, "wb");
+    if (!inFile || !outFile) { printf("Error opening files!\n"); exit(1); }
+
+    char buffer;
+    while (fread(&buffer, sizeof(buffer), 1, inFile)) {
+        if ((buffer >= 'A' && buffer <= 'Z') || (buffer >= 'a' && buffer <= 'z')) {
+            char base = (buffer >= 'a') ? 'a' : 'A';
+            buffer = base + (buffer - base + shift) % 26;
+        }
+        fwrite(&buffer, sizeof(buffer), 1, outFile);
+    }
+    fclose(inFile);
+    fclose(outFile);
+}
+
+void pbkdf2KeyDerivation(const char *password, unsigned char *salt, unsigned char *key) {
+    if (!RAND_bytes(salt, SALT_SIZE)) { printf("Error generating salt!\n"); exit(1); }
+    if (!PKCS5_PBKDF2_HMAC_SHA1(password, strlen(password), salt, SALT_SIZE, PBKDF2_ITERATIONS, AES_BLOCK_SIZE, key)) {
+        printf("Error deriving key!\n");
+        exit(1);
+    }
+}
+
+void aesEncryptDecryptPBKDF2(const char *inputFile, const char *outputFile, int encrypt, const char *password) {
+    FILE *inFile = fopen(inputFile, "rb");
+    FILE *outFile = fopen(outputFile, "wb");
+    if (!inFile || !outFile) { printf("Error opening files!\n"); exit(1); }
+
+    AES_KEY aesKey;
+    unsigned char salt[SALT_SIZE];
+    unsigned char key[AES_BLOCK_SIZE];
+    unsigned char iv[AES_BLOCK_SIZE] = {0};
+    unsigned char buffer[AES_BLOCK_SIZE];
+    unsigned char output[AES_BLOCK_SIZE];
+
+    if (encrypt) {
+        pbkdf2KeyDerivation(password, salt, key);
+        fwrite(salt, 1, SALT_SIZE, outFile);
+        AES_set_encrypt_key(key, 128, &aesKey);
+    } else {
+        fread(salt, 1, SALT_SIZE, inFile);
+        PKCS5_PBKDF2_HMAC_SHA1(password, strlen(password), salt, SALT_SIZE, PBKDF2_ITERATIONS, AES_BLOCK_SIZE, key);
+        AES_set_decrypt_key(key, 128, &aesKey);
+    }
+
+    size_t bytesRead;
+    while ((bytesRead = fread(buffer, 1, AES_BLOCK_SIZE, inFile)) > 0) {
+        if (bytesRead < AES_BLOCK_SIZE) memset(buffer + bytesRead, 0, AES_BLOCK_SIZE - bytesRead);
+        if (encrypt) AES_encrypt(buffer, output, &aesKey);
+        else AES_decrypt(buffer, output, &aesKey);
+        fwrite(output, 1, AES_BLOCK_SIZE, outFile);
+    }
+    fclose(inFile);
+    fclose(outFile);
+}
+
+void generateRSAKeys() {
+    RSA *rsa = RSA_generate_key(RSA_KEY_SIZE, RSA_F4, NULL, NULL);
+    if (!rsa) { printf("Error generating RSA keys!\n"); exit(1); }
+
+    FILE *pubFile = fopen("public.pem", "wb");
+    FILE *privFile = fopen("private.pem", "wb");
+    PEM_write_RSAPublicKey(pubFile, rsa);
+    PEM_write_RSAPrivateKey(privFile, rsa, NULL, NULL, 0, NULL, NULL);
+
+    fclose(pubFile);
+    fclose(privFile);
+    RSA_free(rsa);
+    printf("RSA keys generated: public.pem & private.pem\n");
+}
+
+int main() {
+    char inputFile[100], outputFile[100], password[100];
+    int choice, method;
+
+    printf("Enter the input file name: ");
+    scanf("%s", inputFile);
+    printf("Enter the output file name: ");
+    scanf("%s", outputFile);
+
+    printf("Choose operation:\n1. Encrypt\n2. Decrypt\n3. Generate RSA Keys\nEnter choice: ");
+    scanf("%d", &choice);
+
+    if (choice == 3) {
+        generateRSAKeys();
+        return 0;
+    }
+
+    printf("Choose encryption method:\n1. XOR Cipher\n2. Caesar Cipher\n3. AES Encryption (Fixed Key)\n4. RSA Encryption\n5. Password-Based AES\nEnter choice: ");
+    scanf("%d", &method);
+
+    if (method == 5) {
+        printf("Enter password: ");
+        scanf("%s", password);
+    }
+
+    if (choice == 1) {  // Encrypt
+        if (method == 1) xorEncryptDecrypt(inputFile, outputFile);
+        else if (method == 2) caesarEncryptDecrypt(inputFile, outputFile, CAESAR_SHIFT);
+        else if (method == 3) aesEncryptDecryptPBKDF2(inputFile, outputFile, 1, "fixedkey");
+        else if (method == 4) printf("RSA encryption coming soon...\n");
+        else if (method == 5) aesEncryptDecryptPBKDF2(inputFile, outputFile, 1, password);
+        else printf("Invalid choice!\n");
+    } else if (choice == 2) {  // Decrypt
+        if (method == 1) xorEncryptDecrypt(inputFile, outputFile);
+        else if (method == 2) caesarEncryptDecrypt(inputFile, outputFile, 26 - CAESAR_SHIFT);
+        else if (method == 3) aesEncryptDecryptPBKDF2(inputFile, outputFile, 0, "fixedkey");
+        else if (method == 4) printf("RSA decryption coming soon...\n");
+        else if (method == 5) aesEncryptDecryptPBKDF2(inputFile, outputFile, 0, password);
+        else printf("Invalid choice!\n");
+    } else {
+        printf("Invalid operation!\n");
+    }
+
+    printf("Operation completed! Output saved to %s\n", outputFile);
+    return 0;
+}
